@@ -51,7 +51,7 @@ end
 # =============================================================================
 define stack
   echo \n===== key registers =====\n
-  info registers esp ebp eip
+  info registers esp ebp eip eax
   echo \n===== top of stack (40 words, hex) =====\n
   x/40wx $esp
 end
