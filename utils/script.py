@@ -11,12 +11,11 @@ def configure_vm(ip, port, user, pwd):
         ssh.exec_command("chmod 777 .")
 
         sftp = ssh.open_sftp()
-        sftp.put("server.txt", "server.py")
+        sftp.put("resources.txt", "resources.txt")
         sftp.put("template.gdbinit", ".gdbinit")
-        sftp.chmod("server.py", 0o755)
         sftp.close()
 
-        print("Uploaded server.py and .gdbinit!")
+        print("Uploaded resources.txt and .gdbinit!")
 
     finally:
         ssh.close()
